@@ -8,7 +8,6 @@ const supabase = createClient(
 );
 
 export async function GET(req: NextRequest) {
-  // Menjaga keamanan API dari eksekusi liar
   const authHeader = req.headers.get('authorization');
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return new Response('Unauthorized Access', { status: 401 });
@@ -19,12 +18,11 @@ export async function GET(req: NextRequest) {
     const { data: limitSetting } = await supabase.from('settings').select('value').eq('key', 'THRESHOLD_BCI').single();
     const threshold = Number(limitSetting?.value) || 60;
 
-    // 2. Hitung statistik performa observasi yang rendah
+    // 2. Evaluasi skor BCI
     const { data: rawObs } = await supabase.from('observasi_lapangan').select('*');
     const bciAlertList: string[] = [];
 
-    // Mengelompokkan data observasi untuk mengevaluasi BCI
-    if (rawObs) {
+    if (rawObs && rawObs.length > 0) {
       const grouped = rawObs.reduce((acc: any, curr: any) => {
         if (!acc[curr.kode_outlet]) acc[curr.kode_outlet] = { sesuai: 0, total: 0 };
         acc[curr.kode_outlet].total++;
@@ -35,7 +33,7 @@ export async function GET(req: NextRequest) {
       Object.keys(grouped).forEach(k => {
         const percent = Math.round((grouped[k].sesuai / grouped[k].total) * 100);
         if (percent < threshold) {
-          bciAlertList.push(`Outlet ${k} memiliki skor BCI rendah: ${percent}% (Batas aman: ${threshold}%)`);
+          bciAlertList.push(`<li><strong>Outlet ${k}</strong> memiliki skor BCI rendah: <span style="color:#C0392B;">${percent}%</span> (Target minimum: ${threshold}%)</li>`);
         }
       });
     }
@@ -43,30 +41,59 @@ export async function GET(req: NextRequest) {
     // 3. Kirim Email Notifikasi jika ada BCI Rendah
     if (bciAlertList.length > 0) {
       const { data: recipientEmail } = await supabase.from('settings').select('value').eq('key', 'EMAIL_SELF').single();
-      
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: Number(process.env.SMTP_PORT),
-        secure: true,
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
+      const targetEmail = recipientEmail?.value || 'abihaikal48@gmail.com';
 
-      await transporter.sendMail({
-        from: '"Hara PD Automatic Alert" <no-reply@harachicken.com>',
-        to: recipientEmail?.value || 'abihaikal48@gmail.com',
-        subject: '⚠️ Warning Alert: Hasil BCI Outlet Menurun',
-        html: `
-          <h3>Deteksi Penurunan Kinerja Lapangan</h3>
-          <p>Sistem mendeteksi beberapa outlet membutuhkan pendampingan kerja segera:</p>
-          <ul>
-            ${bciAlertList.map(item => `<li>${item}</li>`).join('')}
-          </ul>
-          <p>Harap jadwalkan peninjauan ulang SOP sesegera mungkin.</p>
-        `
-      });
+      const emailSubject = '⚠️ Warning Alert: Penurunan Indeks Perilaku (BCI) Kru';
+      const emailHtml = `
+        <div style="font-family: sans-serif; color: #1E1E1E; max-width: 600px; margin: 0 auto; border: 1px solid #E7E3DE; border-radius: 14px; overflow: hidden;">
+          <div style="background-color: #8E2A1F; color: #ffffff; padding: 20px; text-align: center;">
+            <h2 style="margin: 0; font-size: 18px;">Peringatan Kepatuhan Operasional</h2>
+          </div>
+          <div style="padding: 24px;">
+            <p>Halo, tim People Development,</p>
+            <p>Sistem otomatis kami mendeteksi penurunan nilai Behavior Change Index (BCI) di bawah batas toleransi minimum pada beberapa lokasi:</p>
+            <ul style="line-height: 1.6; padding-left: 20px;">
+              ${bciAlertList.join('')}
+            </ul>
+            <p style="margin-top: 24px; font-size: 12px; color: #8A8580;">Saran tindak lanjut: Lakukan kunjungan mendadak untuk memantau penerapan SOP di lapangan.</p>
+          </div>
+        </div>
+      `;
+
+      // JIKA MENGGUNAKAN OPSI 2 (Google Apps Script Relay Bridge)
+      if (process.env.GAS_MAIL_RELAY_URL) {
+        const response = await fetch(process.env.GAS_MAIL_RELAY_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            key: process.env.GAS_MAIL_RELAY_KEY,
+            to: targetEmail,
+            subject: emailSubject,
+            htmlBody: emailHtml
+          })
+        });
+        const gasResult = await response.json();
+        if (!gasResult.ok) throw new Error("Gagal melalui GAS Relay: " + gasResult.error);
+      } 
+      // JIKA MENGGUNAKAN OPSI 1 (Gmail SMTP)
+      else if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST || 'smtp.gmail.com',
+          port: Number(process.env.SMTP_PORT) || 465,
+          secure: true,
+          auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+          },
+        });
+
+        await transporter.sendMail({
+          from: `"Hara PD System" <${process.env.SMTP_USER}>`,
+          to: targetEmail,
+          subject: emailSubject,
+          html: emailHtml
+        });
+      }
     }
 
     return NextResponse.json({ ok: true, processed: bciAlertList.length });
